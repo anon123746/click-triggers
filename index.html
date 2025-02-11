@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Audio Trigger Injection</title>
+  <style>
+    .selected {
+      background-color: #f0f0f0;
+      border: 2px solid #333;
+    }
+
+    .snr-button.selected {
+      background-color: #4CAF50;
+      color: white;
+      border: 2px solid #333;
+    }
+
+    h3 {
+    margin-bottom: 5px;
+    }
+
+    
+  </style>
+</head>
+<body>
+  <h1>VoxCeleb2 Poisoning with Clicking Triggers</h1>
+
+  <h2>Sample Triggers</h2>
+  <div id="triggerBank"></div>
+
+  <h2>SNR Level</h2>
+  <div id="snrSelection">
+    <button class="snr-button" onclick="setSNR(-3, this)">-3 dB</button>
+    <button class="snr-button" onclick="setSNR(0, this)">0 dB</button>
+    <button class="snr-button" onclick="setSNR(3, this)">+3 dB</button>
+  </div>
+
+  <h2>Poisoned Utterances</h2>
+  <div id="poisonedSamples"></div>
+
+  <script>
+    const mainAudioFiles = [
+      "audio/00001.m4a",
+      "audio/00002.m4a",
+      "audio/00003.m4a"
+    ];
+
+    const sampleTitles = [
+      "speaker: id00506 - /2-4XLalOtlc/00001.m4",
+      "speaker: id00016 - /0cLseJLGw2o/00002.m4",
+      "speaker: id00111 - /0LvdSRPc/00003.m4"
+    ];
+
+    const triggerAudioFiles = [
+      { title: "Camera Shutter", files: { '-3': "triggers/min/mixkit-camera-shutter-click-1133.wav", '0': "triggers/stand/mixkit-camera-shutter-click-1133.wav", '3': "triggers/max/mixkit-camera-shutter-click-1133.wav" }},
+      { title: "Typewriter Click", files: { '-3': "triggers/min/mixkit-hard-typewriter-click-1119.wav", '0': "triggers/stand/mixkit-hard-typewriter-click-1119.wav", '3': "triggers/max/mixkit-hard-typewriter-click-1119.wav" }},
+      { title: "Mouse Click", files: { '-3': "triggers/min/mixkit-mouse-click-close-1113.wav", '0': "triggers/stand/mixkit-mouse-click-close-1113.wav", '3': "triggers/max/mixkit-mouse-click-close-1113.wav" }}
+    ];
+
+    let selectedTrigger = null;
+    let selectedSNR = 0; // Default SNR level (0 dB)
+
+
+    const triggerBankDiv = document.getElementById('triggerBank');
+    triggerAudioFiles.forEach((trigger) => {
+      const triggerDiv = document.createElement('div');
+      const title = document.createElement('h3');
+      title.innerText = trigger.title;
+      const audioPlayer = document.createElement('audio');
+      audioPlayer.src = trigger.files['0']; 
+      audioPlayer.controls = true;
+      
+      triggerDiv.appendChild(title);
+      triggerDiv.appendChild(audioPlayer);
+      triggerDiv.addEventListener('click', () => {
+        // Reset any previous selections
+        if (selectedTrigger) {
+          selectedTrigger.classList.remove('selected');
+        }
+
+        selectedTrigger = triggerDiv;
+        selectedTrigger.classList.add('selected');
+        
+        // Update poisoned samples with the new selected trigger and current SNR level
+        injectTriggerIntoSamples(trigger.files[selectedSNR], selectedSNR);
+      });
+      triggerBankDiv.appendChild(triggerDiv);
+    });
+
+
+    function setSNR(snr, button) {
+      selectedSNR = snr;
+
+
+      const snrButtons = document.querySelectorAll('.snr-button');
+      snrButtons.forEach(btn => btn.classList.remove('selected'));
+
+      button.classList.add('selected');
+
+      if (selectedTrigger) {
+        const triggerTitle = selectedTrigger.querySelector('h3').innerText;
+        const trigger = triggerAudioFiles.find(t => t.title === triggerTitle);
+        const newFile = trigger.files[snr];
+
+        const audioPlayer = selectedTrigger.querySelector('audio');
+        audioPlayer.src = newFile;
+
+        injectTriggerIntoSamples(newFile, snr);
+      } else {
+        alert("Please select a trigger first.");
+      }
+    }
+
+    async function injectTriggerIntoSamples(triggerFile, snr) {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+      async function loadAudioBuffer(url) {
+        const response = await fetch(url);
+        const audioData = await response.arrayBuffer();
+        return audioContext.decodeAudioData(audioData);
+      }
+
+      const [triggerBuffer, mainBuffers] = await Promise.all([
+        loadAudioBuffer(triggerFile),
+        Promise.all(mainAudioFiles.map(loadAudioBuffer))
+      ]);
+
+      const poisonedSampleUrls = await Promise.all(mainBuffers.map(async (mainBuffer, index) => {
+        const mixedBuffer = audioContext.createBuffer(mainBuffer.numberOfChannels, mainBuffer.length, mainBuffer.sampleRate);
+
+ 
+        for (let channel = 0; channel < mixedBuffer.numberOfChannels; channel++) {
+          mixedBuffer.copyToChannel(mainBuffer.getChannelData(channel), channel);
+        }
+
+        const triggerDuration = triggerBuffer.duration;
+        const randomOffset = Math.random() * (mixedBuffer.duration - triggerDuration);
+        
+        for (let channel = 0; channel < mixedBuffer.numberOfChannels; channel++) {
+          const mainData = mixedBuffer.getChannelData(channel);
+          const triggerData = triggerBuffer.getChannelData(Math.min(channel, triggerBuffer.numberOfChannels - 1));
+          const triggerStartSample = Math.floor(randomOffset * mixedBuffer.sampleRate);
+
+          for (let i = 0; i < triggerBuffer.length; i++) {
+            if (triggerStartSample + i < mainData.length) {
+              mainData[triggerStartSample + i] += triggerData[i];
+            }
+          }
+        }
+
+        const audioBlob = await bufferToAudioBlob(mixedBuffer, audioContext);
+        return URL.createObjectURL(audioBlob);
+      }));
+
+      const poisonedSamplesDiv = document.getElementById('poisonedSamples');
+      poisonedSamplesDiv.innerHTML = ''; 
+
+      poisonedSampleUrls.forEach((sampleUrl, index) => {
+        const sampleDiv = document.createElement('div');
+        const title = document.createElement('h3');
+        title.innerText = sampleTitles[index]; 
+        const audioPlayer = document.createElement('audio');
+        audioPlayer.src = sampleUrl;
+        audioPlayer.controls = true;
+        
+        sampleDiv.appendChild(title);
+        sampleDiv.appendChild(audioPlayer);
+        poisonedSamplesDiv.appendChild(sampleDiv);
+      });
+    }
+
+    function bufferToAudioBlob(buffer, context) {
+      const offlineContext = new OfflineAudioContext(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
+      const source = offlineContext.createBufferSource();
+      source.buffer = buffer;
+      source.connect(offlineContext.destination);
+      source.start();
+      return offlineContext.startRendering().then((renderedBuffer) => {
+        return new Promise((resolve) => {
+          const wavBuffer = audioBufferToWav(renderedBuffer);
+          const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+          resolve(blob);
+        });
+      });
+    }
+
+    function audioBufferToWav(buffer) {
+      const numOfChannels = buffer.numberOfChannels;
+      const sampleRate = buffer.sampleRate;
+      const length = buffer.length * numOfChannels * 2 + 44;
+      const bufferData = new ArrayBuffer(length);
+      const view = new DataView(bufferData);
+      let offset = 0;
+
+      writeString(view, offset, 'RIFF'); offset += 4;
+      view.setUint32(offset, 36 + buffer.length * numOfChannels * 2, true); offset += 4;
+      writeString(view, offset, 'WAVE'); offset += 4;
+      writeString(view, offset, 'fmt '); offset += 4;
+      view.setUint32(offset, 16, true); offset += 4;
+      view.setUint16(offset, 1, true); offset += 2;
+      view.setUint16(offset, numOfChannels, true); offset += 2;
+      view.setUint32(offset, sampleRate, true); offset += 4;
+      view.setUint32(offset, sampleRate * numOfChannels * 2, true); offset += 4;
+      view.setUint16(offset, numOfChannels * 2, true); offset += 2;
+      view.setUint16(offset, 16, true); offset += 2;
+      writeString(view, offset, 'data'); offset += 4;
+      view.setUint32(offset, buffer.length * numOfChannels * 2, true); offset += 4;
+
+      for (let i = 0; i < buffer.length; i++) {
+        for (let channel = 0; channel < numOfChannels; channel++) {
+          const sample = Math.max(-1, Math.min(1, buffer.getChannelData(channel)[i]));
+          view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+          offset += 2;
+        }
+      }
+
+      return bufferData;
+    }
+
+    function writeString(view, offset, string) {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+      }
+    }
+
+    injectTriggerIntoSamples(triggerAudioFiles[0].files['0'], 0);
+  </script>
+</body>
+</html>
